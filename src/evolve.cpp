@@ -121,11 +121,13 @@ int Evolve::EvolveIt(
         //     }
         // }
 
+        int evoFileStatus = 0;
         if (it % Nskip_timestep == 0) {
             if (DATA.outputEvolutionData == 1) {
                 grid_info.OutputEvolutionDataXYEta(*fpCurr, tau);
             } else if (DATA.outputEvolutionData == 2) {
-                grid_info.OutputEvolutionDataXYEta_chun(*fpCurr, tau);
+                evoFileStatus =
+                    grid_info.OutputEvolutionDataXYEta_chun(*fpCurr, tau);
             } else if (DATA.outputEvolutionData == 3) {
                 grid_info.OutputEvolutionDataXYEta_photon(*fpCurr, tau);
             } else if (DATA.outputEvolutionData == 4) {
@@ -145,6 +147,10 @@ int Evolve::EvolveIt(
             if (DATA.output_outofequilibriumsize == 1) {
                 grid_info.OutputEvolution_Knudsen_Reynoldsnumbers(*fpCurr, tau);
             }
+        }
+        if (evoFileStatus == -1) {
+            DATA.reRunHydro = true;
+            return (-1);
         }
 
         if (it == iFreezeStart || it == iFreezeStart + 10
@@ -273,7 +279,12 @@ int Evolve::EvolveIt(
         music_message.flush("info");
         if (frozen == 1 && tau > source_tau_max) {
             if (DATA.outputEvolutionData > 1 && DATA.outputEvolutionData < 5) {
-                if (eps_max_cur < DATA.output_evolution_e_cut) {
+                double emax_loc = 0.;
+                double Tmax_curr = 0.;
+                double nB_max_curr = 0.;
+                grid_info.get_maximum_energy_density(
+                    *fpCurr, emax_loc, nB_max_curr, Tmax_curr);
+                if (emax_loc < DATA.output_evolution_e_cut) {
                     music_message << "All cells e < "
                                   << DATA.output_evolution_e_cut
                                   << " GeV/fm^3.";
@@ -658,7 +669,7 @@ int Evolve::FindFreezeOutSurface_Cornelius_XY(
                 // finally output results !!!!
                 if (surface_in_binary) {
                     const int FOsize = 34 + DATA.output_vorticity * (24 + 14);
-                    float array[FOsize];
+                    std::vector<float> array(FOsize);
                     array[0] = static_cast<float>(tau_center);
                     array[1] = static_cast<float>(x_center);
                     array[2] = static_cast<float>(y_center);
@@ -939,7 +950,7 @@ void Evolve::FreezeOut_equal_tau_Surface_XY(
             // finally output results
             if (surface_in_binary) {
                 const int FOsize = 34 + DATA.output_vorticity * (24 + 14);
-                float array[FOsize];
+                std::vector<float> array(FOsize);
                 array[0] = static_cast<float>(tau_center);
                 array[1] = static_cast<float>(x_center);
                 array[2] = static_cast<float>(y_center);

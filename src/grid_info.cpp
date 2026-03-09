@@ -174,6 +174,7 @@ void Cell_info::OutputEvolutionDataXYEta(Fields &arena, double tau) {
                 double vz = uz / ut;
 
                 double enthropy = thermalVec[0] + thermalVec[2];  // [1/fm^4]
+                double trace_anomaly = thermalVec[0] - 3.0 * thermalVec[2];
 
                 double Wtautau = 0.0;
                 double Wtaux = 0.0;
@@ -199,8 +200,13 @@ void Cell_info::OutputEvolutionDataXYEta(Fields &arena, double tau) {
                 }
 
                 double bulk_Pi = 0.0;
+                double bulk_Pi_kinetic = 0.0;
+                double bulk_Pi_chem = 0.0;
                 if (DATA.turn_on_bulk == 1) {
-                    bulk_Pi = arena.piBulk_[fieldIdx];  // [1/fm^4]
+                    // Output separate components for analysis
+                    bulk_Pi_kinetic = arena.piBulk_[fieldIdx];   // [1/fm^4]
+                    bulk_Pi_chem = arena.piBulkChem_[fieldIdx];  // [1/fm^4]
+                    bulk_Pi = bulk_Pi_kinetic + bulk_Pi_chem;  // Total [1/fm^4]
                 }
 
                 // outputs for baryon diffusion part
@@ -235,8 +241,9 @@ void Cell_info::OutputEvolutionDataXYEta(Fields &arena, double tau) {
                         }
                         if (DATA.turn_on_bulk) {
                             fprintf(
-                                out_file_bulkpi_xyeta, "%e %e %e\n", bulk_Pi,
-                                enthropy, thermalVec[5]);
+                                out_file_bulkpi_xyeta, "%e %e %e %e %e %e %e\n",
+                                tau, bulk_Pi_kinetic, bulk_Pi_chem, bulk_Pi,
+                                enthropy, thermalVec[5], trace_anomaly);
                         }
                     }
                 } else {
@@ -262,11 +269,15 @@ void Cell_info::OutputEvolutionDataXYEta(Fields &arena, double tau) {
                         }
                         if (DATA.turn_on_bulk == 1) {
                             float array1[] = {
+                                static_cast<float>(tau),
+                                static_cast<float>(bulk_Pi_kinetic),
+                                static_cast<float>(bulk_Pi_chem),
                                 static_cast<float>(bulk_Pi),
                                 static_cast<float>(enthropy),
-                                static_cast<float>(thermalVec[5])};
+                                static_cast<float>(thermalVec[5]),
+                                static_cast<float>(trace_anomaly)};
                             fwrite(
-                                array1, sizeof(float), 3,
+                                array1, sizeof(float), 7,
                                 out_file_bulkpi_xyeta);
                         }
                         if (DATA.turn_on_diff == 1) {
@@ -409,7 +420,7 @@ void Cell_info::OutputEvolutionDataXYEta_memory(
 }
 
 //! This function outputs hydro evolution file in binary format
-void Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
+int Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
     // the format of the file is as follows,
     //    itau ix iy ieta e P T cs^2 ux uy ueta
     // if turn_on_shear == 1:
@@ -461,9 +472,13 @@ void Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
     const double output_ymin = -DATA.y_size / 2.;
     const double output_etamin = -DATA.eta_size / 2.;
 
-    const int nVar_per_cell =
+    int nVar_per_cell =
         (11 + DATA.turn_on_rhob * 2 + DATA.turn_on_shear * 5
          + DATA.turn_on_bulk * 1 + DATA.turn_on_diff * 3);
+    if (DATA.output_evolution_ideal_only) {
+        nVar_per_cell = 11 + DATA.turn_on_rhob * 2;
+    }
+
     if (tau == DATA.tau0) {
         float header[] = {static_cast<float>(DATA.tau0),
                           static_cast<float>(output_dtau),
@@ -481,6 +496,11 @@ void Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
                           static_cast<float>(DATA.turn_on_bulk),
                           static_cast<float>(DATA.turn_on_diff),
                           static_cast<float>(nVar_per_cell)};
+        if (DATA.output_evolution_ideal_only) {
+            header[12] = 0.0;  // turn on shear
+            header[13] = 0.0;  // turn on bulk
+            header[14] = 0.0;  // turn on diff
+        }
         fwrite(header, sizeof(float), 16, out_file_xyeta);
     }
     std::vector<double> thermalVec;
@@ -504,7 +524,8 @@ void Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
                               << DATA.output_evolution_e_cut
                               << " GeV/fm^3, are reaching the grid edge! "
                               << "ix = " << ix << ", iy = " << iy << std::endl;
-                    exit(-1);
+                    fclose(out_file_xyeta);
+                    return (-1);
                 }
 
                 eos.getThermalVariables(e_local, rhob_local, thermalVec);
@@ -578,29 +599,32 @@ void Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
                     fwrite(mu, sizeof(float), 2, out_file_xyeta);
                 }
 
-                if (DATA.turn_on_shear == 1) {
-                    float shear_pi[] = {
-                        static_cast<float>(Wxx), static_cast<float>(Wxy),
-                        static_cast<float>(Wxz), static_cast<float>(Wyy),
-                        static_cast<float>(Wyz)};
-                    fwrite(shear_pi, sizeof(float), 5, out_file_xyeta);
-                }
+                if (!DATA.output_evolution_ideal_only) {
+                    if (DATA.turn_on_shear == 1) {
+                        float shear_pi[] = {
+                            static_cast<float>(Wxx), static_cast<float>(Wxy),
+                            static_cast<float>(Wxz), static_cast<float>(Wyy),
+                            static_cast<float>(Wyz)};
+                        fwrite(shear_pi, sizeof(float), 5, out_file_xyeta);
+                    }
 
-                if (DATA.turn_on_bulk == 1) {
-                    float bulk_pi[] = {static_cast<float>(pi_b)};
-                    fwrite(bulk_pi, sizeof(float), 1, out_file_xyeta);
-                }
+                    if (DATA.turn_on_bulk == 1) {
+                        float bulk_pi[] = {static_cast<float>(pi_b)};
+                        fwrite(bulk_pi, sizeof(float), 1, out_file_xyeta);
+                    }
 
-                if (DATA.turn_on_diff == 1) {
-                    float diffusion[] = {
-                        static_cast<float>(qx), static_cast<float>(qy),
-                        static_cast<float>(qz)};
-                    fwrite(diffusion, sizeof(float), 3, out_file_xyeta);
+                    if (DATA.turn_on_diff == 1) {
+                        float diffusion[] = {
+                            static_cast<float>(qx), static_cast<float>(qy),
+                            static_cast<float>(qz)};
+                        fwrite(diffusion, sizeof(float), 3, out_file_xyeta);
+                    }
                 }
             }
         }
     }
     fclose(out_file_xyeta);
+    return 0;
 }
 
 //! This function outputs hydro evolution file in binary format for photon

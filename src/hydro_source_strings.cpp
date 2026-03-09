@@ -85,10 +85,12 @@ void HydroSourceStrings::read_in_QCD_strings_and_partons() {
             >> new_string->remnant_r >> new_string->y_l_i >> new_string->y_r_i
             >> new_string->eta_s_baryon_left >> new_string->eta_s_baryon_right
             >> new_string->y_l_baryon >> new_string->y_r_baryon
-            >> new_string->baryon_frac_l;
+            >> new_string->baryon_frac_l >> new_string->baryon_frac_r
+            >> new_string->electricQ_frac_l >> new_string->electricQ_frac_r
+            >> new_string->eta_s_electricQ_left;
         if (!text_stream.eof()) {
             // read in the last element
-            text_stream >> new_string->baryon_frac_r;
+            text_stream >> new_string->eta_s_electricQ_right;
         } else {
             // the string is too short
             music_message << "read_in_QCD_strings_and_partons: "
@@ -197,7 +199,7 @@ void HydroSourceStrings::read_in_QCD_strings_and_partons() {
 
     DATA.beam_rapidity =
         acosh(total_energy / (total_baryon_number * Util::m_N));
-    DATA.eta_size = 2. * (DATA.beam_rapidity + DATA.gridPadding - 1);
+    DATA.eta_size = 2. * DATA.beam_rapidity;
     DATA.delta_eta = DATA.eta_size / (DATA.neta - 1);
 
     double xMax = 0.;
@@ -367,13 +369,12 @@ void HydroSourceStrings::get_hydro_energy_source(
         const double sigma_x = it->sigma_x;
         const double sigma_x_sq = sigma_x * sigma_x;
         const double sigma_eta = it->sigma_eta;
-        const double alpsig = preEqFlowFactor_ * sigma_x;
-        const double prefactor_prep =
-            (1.
-             / (2. * M_PI
-                * (sigma_x_sq
-                   + exp(alpsig * alpsig / 2.) * sqrt(M_PI / 2) * alpsig
-                         * sigma_x_sq * erf(alpsig / sqrt(2.)))));
+        const double preFlowNorm =
+            (1. / 2. * sigma_x_sq
+             * (2.
+                + exp(preEqFlowFactor_ * preEqFlowFactor_ / 2.) * sqrt(2 * M_PI)
+                      * preEqFlowFactor_ * erf(preEqFlowFactor_ / sqrt(2.))));
+        const double prefactor_prep = 1. / (2. * M_PI * preFlowNorm);
         const double prefactor_etas = 1. / (sqrt(2. * M_PI) * sigma_eta);
         const double skip_dis_x = n_sigma_skip * sigma_x;
         const double skip_dis_eta = n_sigma_skip * sigma_eta;
@@ -455,10 +456,10 @@ void HydroSourceStrings::get_hydro_energy_source(
 
         double exp_xperp =
             exp(-(x_dis * x_dis + y_dis * y_dis) / (2. * sigma_x * sigma_x));
-        double cosh_perp =
-            (cosh(preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)));
-        double sinh_perp =
-            (sinh(preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)));
+        double cosh_perp = (cosh(
+            preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis) / sigma_x));
+        double sinh_perp = (sinh(
+            preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis) / sigma_x));
         double phi_perp = atan2(y_dis, x_dis);
 
         double e_local = exp_tau * exp_xperp * exp_eta_s * it->norm;
@@ -493,13 +494,12 @@ void HydroSourceStrings::get_hydro_energy_source(
         const double sigma_x = it->sigma_x;
         const double sigma_x_sq = sigma_x * sigma_x;
         const double sigma_eta = it->sigma_eta;
-        const double alpsig = preEqFlowFactor_ * sigma_x;
-        const double prefactor_prep =
-            (1.
-             / (2. * M_PI
-                * (sigma_x_sq
-                   + exp(alpsig * alpsig / 2.) * sqrt(M_PI / 2) * alpsig
-                         * sigma_x_sq * erf(alpsig / sqrt(2.)))));
+        const double preFlowNorm =
+            (1. / 2. * sigma_x_sq
+             * (2.
+                + exp(preEqFlowFactor_ * preEqFlowFactor_ / 2.) * sqrt(2 * M_PI)
+                      * preEqFlowFactor_ * erf(preEqFlowFactor_ / sqrt(2.))));
+        const double prefactor_prep = 1. / (2. * M_PI * preFlowNorm);
         const double prefactor_etas = 1. / (sqrt(2. * M_PI) * sigma_eta);
         const double prefactors = prefactor_prep * prefactor_etas;
         const double skip_dis_x = n_sigma_skip * sigma_x;
@@ -564,10 +564,12 @@ void HydroSourceStrings::get_hydro_energy_source(
                  * exp(
                      -(x_dis * x_dis + y_dis * y_dis)
                      / (2. * sigma_x * sigma_x)));
-            cosh_perp =
-                (cosh(preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)));
-            sinh_perp =
-                (sinh(preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)));
+            cosh_perp = (cosh(
+                preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)
+                / sigma_x));
+            sinh_perp = (sinh(
+                preEqFlowFactor_ * sqrt(x_dis * x_dis + y_dis * y_dis)
+                / sigma_x));
             phi_perp = atan2(y_dis, x_dis);
         }
         j_mu[0] += exp_xperp * cosh_long * cosh_perp;
