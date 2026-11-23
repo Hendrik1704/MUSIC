@@ -32,7 +32,6 @@ Cell_info::Cell_info(const InitData &DATA_in, const EOS &eos_in)
                     "tables/Coefficients_RTA_diffusion.dat");
         }
     }
-    Pmu_edge_prev = {0.};
     outflow_flux = {0.};
 }
 
@@ -393,27 +392,21 @@ void Cell_info::OutputEvolutionDataXYEta_memory(
                         ((static_cast<double>(ieta)) * (DATA.delta_eta)
                          - (DATA.eta_size) / 2.0);
                 }
-                double cosh_eta = cosh(eta);
-                double sinh_eta = sinh(eta);
-
                 double e_local = arena.e_[fieldIdx];        // 1/fm^4
                 double rhob_local = arena.rhob_[fieldIdx];  // 1/fm^3
                 double p_local = eos.get_pressure(e_local, rhob_local);
-                double utau = arena.u_[0][fieldIdx];
+                // store the Milne components u^x, u^y, tau*u^eta;
+                // HydroinfoMUSIC converts them to Cartesian velocities
                 double ux = arena.u_[1][fieldIdx];
                 double uy = arena.u_[2][fieldIdx];
                 double ueta = arena.u_[3][fieldIdx];
-                double ut = utau * cosh_eta + ueta * sinh_eta;  // gamma factor
-                double vx = ux / ut;
-                double vy = uy / ut;
-                double uz = ueta * cosh_eta + utau * sinh_eta;
-                double vz = uz / ut;
 
                 double T_local = eos.get_temperature(e_local, rhob_local);
                 double s_local = eos.get_entropy(e_local, rhob_local);
 
                 hydro_info_ptr.dump_ideal_info_to_memory(
-                    tau, eta, e_local, p_local, s_local, T_local, vx, vy, vz);
+                    tau, eta, e_local, p_local, s_local, T_local, ux, uy,
+                    ueta);
             }
         }
     }
@@ -627,6 +620,104 @@ int Cell_info::OutputEvolutionDataXYEta_chun(Fields &arena, double tau) {
     return 0;
 }
 
+//! This function outputs hydro evolution file in binary format
+void Cell_info::OutputEvolutionDataXYEta_MLtraining(Fields &arena, double tau) {
+    // the format of the file is as follows,
+    //    e P ux uy ueta Wxx Wxy Wxeta Wyy Wyeta bulk_pi rhob
+    const string out_name_xyeta = "evolution_all_xyeta_ML.dat";
+    string out_open_mode;
+    FILE *out_file_xyeta;
+    // If it's the first timestep, overwrite the previous file
+    if (tau == DATA.tau0) {
+        out_open_mode = "wb";
+    } else {
+        out_open_mode = "ab";
+    }
+    out_file_xyeta = fopen(out_name_xyeta.c_str(), out_open_mode.c_str());
+
+    int n_skip_tau = DATA.output_evolution_every_N_timesteps;
+    double output_dtau = DATA.delta_tau * n_skip_tau;
+
+    int n_skip_x = DATA.output_evolution_every_N_x;
+    int n_skip_y = DATA.output_evolution_every_N_y;
+    int n_skip_eta = DATA.output_evolution_every_N_eta;
+
+    // write out header
+    const int output_nx = static_cast<int>(arena.nX() / n_skip_x);
+    const int output_ny = static_cast<int>(arena.nY() / n_skip_y);
+    const int output_neta = static_cast<int>(arena.nEta() / n_skip_eta);
+    const double output_dx = DATA.delta_x * n_skip_x;
+    const double output_dy = DATA.delta_y * n_skip_y;
+    const double output_deta = DATA.delta_eta * n_skip_eta;
+    const double output_xmin = -DATA.x_size / 2.;
+    const double output_ymin = -DATA.y_size / 2.;
+    const double output_etamin = -DATA.eta_size / 2.;
+
+    int nVar_per_cell = 13;
+
+    if (tau == DATA.tau0) {
+        float header[] = {static_cast<float>(DATA.tau0),
+                          static_cast<float>(output_dtau),
+                          static_cast<float>(output_nx),
+                          static_cast<float>(output_dx),
+                          static_cast<float>(output_xmin),
+                          static_cast<float>(output_ny),
+                          static_cast<float>(output_dy),
+                          static_cast<float>(output_ymin),
+                          static_cast<float>(output_neta),
+                          static_cast<float>(output_deta),
+                          static_cast<float>(output_etamin),
+                          static_cast<float>(nVar_per_cell)};
+        fwrite(header, sizeof(float), 12, out_file_xyeta);
+    }
+    std::vector<double> thermalVec;
+    for (int ieta = 0; ieta < arena.nEta(); ieta += n_skip_eta) {
+        for (int iy = 0; iy < arena.nY(); iy += n_skip_y) {
+            for (int ix = 0; ix < arena.nX(); ix += n_skip_x) {
+                int fieldIdx = arena.getFieldIdx(ix, iy, ieta);
+                double e_local = arena.e_[fieldIdx];        // 1/fm^4
+                double rhob_local = arena.rhob_[fieldIdx];  // 1/fm^3
+
+                eos.getThermalVariables(e_local, rhob_local, thermalVec);
+                double p_local = thermalVec[2];
+                double T_local = thermalVec[6] * hbarc;  // GeV
+                // double muB_local = thermalVec[7] * hbarc;  // GeV
+
+                double ux = arena.u_[1][fieldIdx];
+                double uy = arena.u_[2][fieldIdx];
+                double ueta = arena.u_[3][fieldIdx];
+
+                double div_factor = e_local + p_local;  // 1/fm^4
+                double Wxx = arena.Wmunu_[4][fieldIdx] / div_factor;
+                double Wxy = arena.Wmunu_[5][fieldIdx] / div_factor;
+                double Wxeta = arena.Wmunu_[6][fieldIdx] / div_factor;
+                double Wyy = arena.Wmunu_[7][fieldIdx] / div_factor;
+                double Wyeta = arena.Wmunu_[8][fieldIdx] / div_factor;
+                double pi_b = arena.piBulk_[fieldIdx] / div_factor;
+
+                float fluidCell[] = {
+                    static_cast<float>(e_local * hbarc),
+                    static_cast<float>(p_local * hbarc),
+                    static_cast<float>(ux),
+                    static_cast<float>(uy),
+                    static_cast<float>(ueta),
+                    static_cast<float>(Wxx),
+                    static_cast<float>(Wxy),
+                    static_cast<float>(Wxeta),
+                    static_cast<float>(Wyy),
+                    static_cast<float>(Wyeta),
+                    static_cast<float>(pi_b),
+                    static_cast<float>(rhob_local),
+                    static_cast<float>(T_local),
+                };
+
+                fwrite(fluidCell, sizeof(float), nVar_per_cell, out_file_xyeta);
+            }
+        }
+    }
+    fclose(out_file_xyeta);
+}
+
 //! This function outputs hydro evolution file in binary format for photon
 //! production
 void Cell_info::OutputEvolutionDataXYEta_photon(Fields &arena, double tau) {
@@ -763,116 +854,6 @@ void Cell_info::OutputEvolutionDataXYEta_photon(Fields &arena, double tau) {
         }
     }
     fclose(out_file_xyeta);
-}
-
-// Print bulk or other transport coefficients
-void Cell_info::OutputEvolutionDataXYEta_Bulk(Fields &arena_curr, double tau) {
-    const string out_name_coeff = "evolution_coeff.dat";
-    string out_open_mode;
-    FILE *out_file_coeff      = NULL;
-
-    // If it's the first timestep, overwrite the previous file
-    if (tau == DATA.tau0) {
-        out_open_mode = "w";
-    } else {
-        out_open_mode = "a";
-    }
-    // If we output in binary, set the mode accordingly
-    if (0 == DATA.outputBinaryEvolution) {
-        out_open_mode += "b";
-    }
-    if ((DATA.turn_on_shear == 1)&&(DATA.turn_on_bulk == 1)) {
-        out_file_coeff = fopen(out_name_coeff.c_str(),
-                                 out_open_mode.c_str());
-    }
-    
-    const int n_skip_x   = DATA.output_evolution_every_N_x;
-    const int n_skip_y   = DATA.output_evolution_every_N_y;
-    const int n_skip_eta = DATA.output_evolution_every_N_eta;
-    for (int ieta = 0; ieta < arena_curr.nEta(); ieta += n_skip_eta) {
-        for (int iy = 0; iy < arena_curr.nY(); iy += n_skip_y) {
-            for (int ix = 0; ix < arena_curr.nX(); ix += n_skip_x) {
-                int fieldIdx = arena_curr.getFieldIdx(ix, iy, ieta);
-                double e_local    = arena_curr.e_[fieldIdx];  // 1/fm^4
-                double rhob_local = arena_curr.rhob_[fieldIdx];     // 1/fm^3
-                double T_local  = eos.get_temperature(e_local, rhob_local); // 1/fm
-                double p_local  = eos.get_pressure(e_local, rhob_local);   // 1/fm^4
-                double s_local = eos.get_entropy(e_local, rhob_local);  // 1/fm^3
-                double cs2 = eos.get_cs2(e_local, rhob_local);
-
-                double utau = arena_curr.u_[0][fieldIdx];
-                double ux   = arena_curr.u_[1][fieldIdx];
-                double uy   = arena_curr.u_[2][fieldIdx];
-                double ueta = arena_curr.u_[3][fieldIdx];
-
-                double Wtautau = 0.0;
-                double Wtaux   = 0.0;
-                double Wtauy   = 0.0;
-                double Wtaueta = 0.0;
-                double Wxx     = 0.0;
-                double Wxy     = 0.0;
-                double Wxeta   = 0.0;
-                double Wyy     = 0.0;
-                double Wyeta   = 0.0;
-                double Wetaeta = 0.0;
-                double bulk_Pi = 0.0;
-                if (DATA.turn_on_bulk == 1){
-                    bulk_Pi = arena_curr.piBulk_[fieldIdx]; //1/fm^4
-                }
-                if (DATA.turn_on_shear == 1){ // in fm units
-                    Wtautau = arena_curr.Wmunu_[0][fieldIdx];
-                    Wtaux   = arena_curr.Wmunu_[1][fieldIdx];
-                    Wtauy   = arena_curr.Wmunu_[2][fieldIdx];
-                    Wtaueta = arena_curr.Wmunu_[3][fieldIdx];
-                    Wxx     = arena_curr.Wmunu_[4][fieldIdx];
-                    Wxy     = arena_curr.Wmunu_[5][fieldIdx];
-                    Wxeta   = arena_curr.Wmunu_[6][fieldIdx];
-                    Wyy     = arena_curr.Wmunu_[7][fieldIdx];
-                    Wyeta   = arena_curr.Wmunu_[8][fieldIdx];
-                    Wetaeta = arena_curr.Wmunu_[9][fieldIdx];
-                }
-                // select what you want to print
-                if (DATA.outputBinaryEvolution == 0) {
-                    if (DATA.viscosity_flag == 1){
-                        fprintf(out_file_coeff,
-                                "%e %e %e %e %e %e %e %e %e %e %e %e %e %e %e %e %e %e %e %e \n",
-                                e_local*hbarc, utau, ux, uy, ueta, Wtautau, Wtaux, Wtauy, Wtaueta, Wxx, Wxy, Wxeta, Wyy, Wyeta, 
-                                Wyeta, bulk_Pi*hbarc, s_local*hbarc, T_local*hbarc, p_local*hbarc, cs2); // print in GeV/fm^3
-                    }
-                } else {
-                    if (DATA.viscosity_flag == 1) {
-                        if ((DATA.turn_on_shear == 1)&&(DATA.turn_on_bulk == 1)) {
-                            float array[] = {static_cast<float>(e_local*hbarc),
-                                              static_cast<float>(utau),
-                                              static_cast<float>(ux),
-                                              static_cast<float>(uy),
-                                              static_cast<float>(ueta),
-                                              static_cast<float>(Wtautau),
-                                              static_cast<float>(Wtaux),
-                                              static_cast<float>(Wtauy),
-                                              static_cast<float>(Wtaueta),
-                                              static_cast<float>(Wxx),
-                                              static_cast<float>(Wxy),
-                                              static_cast<float>(Wxeta),
-                                              static_cast<float>(Wyy),
-                                              static_cast<float>(Wyeta),
-                                              static_cast<float>(Wetaeta),
-                                              static_cast<float>(bulk_Pi*hbarc),
-                                              static_cast<float>(s_local*hbarc),
-                                              static_cast<float>(T_local*hbarc),
-                                              static_cast<float>(p_local*hbarc),
-                                              static_cast<float>(cs2)};
-                            fwrite(array, sizeof(float), 20,
-                                   out_file_coeff);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if ((DATA.turn_on_shear == 1)&&(DATA.turn_on_bulk == 1)) {
-        fclose(out_file_coeff);
-    }
 }
 
 //! This function outputs hydro evolution file in binary format
@@ -1052,6 +1033,135 @@ void Cell_info::get_maximum_energy_density(
     Tmax = T_max;
 }
 
+//! This function computes OAM area density at a give proper time
+void Cell_info::compute_Lmunu(
+    Fields &arena, Fields &arena_prev, const double tau) {
+    const double deta = DATA.delta_eta;
+    const double dx = DATA.delta_x;
+    const double dy = DATA.delta_y;
+    const int neta = arena.nEta();
+    const int nx = arena.nX();
+    const int ny = arena.nY();
+
+    ostringstream tau_suffix;
+    tau_suffix << std::fixed << std::setfill('0') << std::setw(7)
+               << std::setprecision(3) << tau;
+    ostringstream filename;
+    filename << "Lmunu_angular_momentum_tau_" << tau_suffix.str() << ".dat";
+
+    ofstream output_file;
+    output_file.open(filename.str().c_str(), std::ofstream::out);
+    output_file << "# Tau = " << tau << "\n";
+    output_file << "# deta = " << deta << "\n";
+    output_file << "# dx = " << dx << "\n";
+    output_file << "# dy = " << dy << "\n";
+    output_file << "# neta = " << neta << "\n";
+    output_file << "# nx = " << nx << "\n";
+    output_file << "# ny = " << ny << "\n";
+
+    output_file
+        << "Lx_xy[hbar fm^-2]   Ly_xy[hbar fm^-2]   Lz_xy[hbar fm^-2]   "
+        << "L^{tx}_xy[hbar fm^-2]   L^{ty}_xy[hbar fm^-2]   L^{tz}_xy[hbar "
+           "fm^-2]"
+        << std::endl;
+
+    std::vector<std::vector<std::vector<double>>> Lx(
+        neta,
+        std::vector<std::vector<double>>(nx, std::vector<double>(ny, 0.0)));
+    std::vector<std::vector<std::vector<double>>> Ly = Lx;
+    std::vector<std::vector<std::vector<double>>> Lz = Lx;
+    std::vector<std::vector<std::vector<double>>> Ltx = Lx;
+    std::vector<std::vector<std::vector<double>>> Lty = Lx;
+    std::vector<std::vector<std::vector<double>>> Ltz = Lx;
+
+    std::vector<std::vector<double>> Lx_xy(nx, std::vector<double>(ny, 0.0));
+    std::vector<std::vector<double>> Ly_xy(nx, std::vector<double>(ny, 0.0));
+    std::vector<std::vector<double>> Lz_xy(nx, std::vector<double>(ny, 0.0));
+    std::vector<std::vector<double>> Ltx_xy(nx, std::vector<double>(ny, 0.0));
+    std::vector<std::vector<double>> Lty_xy(nx, std::vector<double>(ny, 0.0));
+    std::vector<std::vector<double>> Ltz_xy(nx, std::vector<double>(ny, 0.0));
+
+    for (int ieta = 0; ieta < neta; ieta++) {
+        for (int ix = 0; ix < nx; ix++) {
+            for (int iy = 0; iy < ny; iy++) {
+                const int Idx = arena.getFieldIdx(ix, iy, ieta);
+
+                double eta_s = deta * ieta - (DATA.eta_size) / 2.0;
+                const double cosh_eta = cosh(eta_s);
+                const double sinh_eta = sinh(eta_s);
+                const double t_local = tau * cosh_eta;
+                const double x_local = -DATA.x_size / 2.0 + ix * dx;
+                const double y_local = -DATA.y_size / 2.0 + iy * dy;
+                const double z_local = tau * sinh_eta;
+
+                const double e_local = arena.e_[Idx];
+                const double pressure =
+                    eos.get_pressure(e_local, arena.rhob_[Idx]);
+                const double u0 = arena.u_[0][Idx];
+                const double u1 = arena.u_[1][Idx];
+                const double u2 = arena.u_[2][Idx];
+                const double u3 = arena.u_[3][Idx];
+                const double uPrev0 = arena_prev.u_[0][Idx];
+                const double uPrev1 = arena_prev.u_[1][Idx];
+                const double uPrev2 = arena_prev.u_[2][Idx];
+                const double uPrev3 = arena_prev.u_[3][Idx];
+
+                const double T00_local =
+                    (e_local + pressure) * u0 * u0 - pressure;
+                const double Pi00_rk_0 =
+                    arena_prev.piBulk_[Idx] * (-1. + uPrev0 * uPrev0);
+
+                const double T_tau_tau =
+                    (T00_local + arena_prev.Wmunu_[0][Idx] + Pi00_rk_0);
+                const double T_tau_x =
+                    ((e_local + pressure) * u0 * u1 + arena_prev.Wmunu_[1][Idx]
+                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev1);
+                const double T_tau_y =
+                    ((e_local + pressure) * u0 * u2 + arena_prev.Wmunu_[2][Idx]
+                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev2);
+                const double T_tau_eta =
+                    ((e_local + pressure) * u0 * u3 + arena_prev.Wmunu_[3][Idx]
+                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev3);
+                const double T_tau_t =
+                    T_tau_tau * cosh_eta + T_tau_eta * sinh_eta;
+                const double T_tau_z =
+                    T_tau_tau * sinh_eta + T_tau_eta * cosh_eta;
+
+                Lx[ieta][ix][iy] = y_local * T_tau_z - z_local * T_tau_y;
+                Ly[ieta][ix][iy] = z_local * T_tau_x - x_local * T_tau_z;
+                Lz[ieta][ix][iy] = x_local * T_tau_y - y_local * T_tau_x;
+
+                Ltx[ieta][ix][iy] = t_local * T_tau_x - x_local * T_tau_t;
+                Lty[ieta][ix][iy] = t_local * T_tau_y - y_local * T_tau_t;
+                Ltz[ieta][ix][iy] = t_local * T_tau_z - z_local * T_tau_t;
+            }
+        }
+    }
+
+    // Integration over eta
+    // Lmunu area densities are written
+
+    for (int ix = 0; ix < nx; ++ix) {
+        for (int iy = 0; iy < ny; ++iy) {
+            for (int ieta = 0; ieta < neta; ++ieta) {
+                const double dz = tau * deta;
+                Lx_xy[ix][iy] += Lx[ieta][ix][iy] * dz;
+                Ly_xy[ix][iy] += Ly[ieta][ix][iy] * dz;
+                Lz_xy[ix][iy] += Lz[ieta][ix][iy] * dz;
+                Ltx_xy[ix][iy] += Ltx[ieta][ix][iy] * dz;
+                Lty_xy[ix][iy] += Lty[ieta][ix][iy] * dz;
+                Ltz_xy[ix][iy] += Ltz[ieta][ix][iy] * dz;
+            }
+
+            output_file << std::scientific << std::setprecision(6)
+                        << Lx_xy[ix][iy] << " " << Ly_xy[ix][iy] << " "
+                        << Lz_xy[ix][iy] << " " << Ltx_xy[ix][iy] << " "
+                        << Lty_xy[ix][iy] << " " << Ltz_xy[ix][iy] << std::endl;
+        }
+    }
+    output_file.close();
+}
+
 //! This function computes global angular momentum at a give proper time
 void Cell_info::compute_angular_momentum(
     Fields &arena, Fields &arena_prev, const double tau, const double eta_min,
@@ -1096,8 +1206,8 @@ void Cell_info::compute_angular_momentum(
                 const double cosh_eta = cosh(eta_s);
                 const double sinh_eta = sinh(eta_s);
                 const double t_local = tau * cosh_eta;
-                const double x_local = DATA.x_size / 2. + ix * dx;
-                const double y_local = DATA.x_size / 2. + iy * dy;
+                const double x_local = -DATA.x_size / 2. + ix * dx;
+                const double y_local = -DATA.y_size / 2. + iy * dy;
                 const double z_local = tau * sinh_eta;
 
                 const double e_local = arena.e_[Idx];
@@ -1177,11 +1287,6 @@ void Cell_info::check_conservation_law(
     double T_tau_x = 0.0;
     double T_tau_y = 0.0;
     double T_tau_z = 0.0;
-    double N_B_edge = 0.0;
-    double T_tau_t_edge = 0.0;
-    double T_tau_x_edge = 0.0;
-    double T_tau_y_edge = 0.0;
-    double T_tau_z_edge = 0.0;
     double deta = DATA.delta_eta;
     double dx = DATA.delta_x;
     double dy = DATA.delta_y;
@@ -1189,9 +1294,8 @@ void Cell_info::check_conservation_law(
     const int nx = arena.nX();
     const int ny = arena.nY();
 
-#pragma omp parallel for collapse(3) reduction(                              \
-        + : N_B, T_tau_t, T_tau_x, T_tau_y, T_tau_z, N_B_edge, T_tau_t_edge, \
-            T_tau_x_edge, T_tau_y_edge, T_tau_z_edge)
+#pragma omp parallel for collapse(3) \
+    reduction(+ : N_B, T_tau_t, T_tau_x, T_tau_y, T_tau_z)
     for (int ieta = 0; ieta < neta; ieta++)
         for (int ix = 0; ix < nx; ix++)
             for (int iy = 0; iy < ny; iy++) {
@@ -1201,51 +1305,48 @@ void Cell_info::check_conservation_law(
                 const double cosh_eta = cosh(eta_s);
                 const double sinh_eta = sinh(eta_s);
 
-                N_B += arena.rhob_[Idx] * arena.u_[0][Idx]
-                       + arena_prev.Wmunu_[10][Idx];
+                // The KT/RK2 update conserves tau_n T_ideal^{tau mu}(n) +
+                // 1/2 [tau_{n+1} V(n) + tau_n V(n-1)], with V^mu = W^{tau mu}
+                // + Pi (g^{tau mu} + u^tau u^mu) and Pi = Pi_bulk + Pi_chem
+                // at each time level (see Advance::FirstRKStepT). Divided by
+                // tau here; the factor below multiplies by tau.
+                const double wCurr = 0.5 * (1. + DATA.delta_tau / tau);
+                const double wPrev = 0.5;
                 const double e_local = arena.e_[Idx];
                 const double pressure =
                     eos.get_pressure(e_local, arena.rhob_[Idx]);
-                const double u0 = arena.u_[0][Idx];
-                const double u1 = arena.u_[1][Idx];
-                const double u2 = arena.u_[2][Idx];
-                const double u3 = arena.u_[3][Idx];
-                const double uPrev0 = arena_prev.u_[0][Idx];
-                const double uPrev1 = arena_prev.u_[1][Idx];
-                const double uPrev2 = arena_prev.u_[2][Idx];
-                const double uPrev3 = arena_prev.u_[3][Idx];
-                const double T00_local =
-                    (e_local + pressure) * u0 * u0 - pressure;
-                const double Pi00_rk_0 =
-                    (arena_prev.piBulk_[Idx]
-                     * (-1.0 + arena_prev.u_[0][Idx] * arena_prev.u_[0][Idx]));
-
-                const double T_tau_tau =
-                    (T00_local + arena_prev.Wmunu_[0][Idx] + Pi00_rk_0);
-                const double T01_local =
-                    ((e_local + pressure) * u0 * u1 + arena_prev.Wmunu_[1][Idx]
-                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev1);
-                const double T02_local =
-                    ((e_local + pressure) * u0 * u2 + arena_prev.Wmunu_[2][Idx]
-                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev2);
-                const double T_tau_eta =
-                    ((e_local + pressure) * u0 * u3 + arena_prev.Wmunu_[3][Idx]
-                     + arena_prev.piBulk_[Idx] * uPrev0 * uPrev3);
+                const double PiCurr =
+                    arena.piBulk_[Idx] + arena.piBulkChem_[Idx];
+                const double PiPrev =
+                    arena_prev.piBulk_[Idx] + arena_prev.piBulkChem_[Idx];
+                double T[4];
+                for (int a = 0; a < 4; a++) {
+                    const double g = (a == 0 ? -1. : 0.);
+                    const double VCurr =
+                        arena.Wmunu_[a][Idx]
+                        + PiCurr * (g + arena.u_[0][Idx] * arena.u_[a][Idx]);
+                    const double VPrev =
+                        arena_prev.Wmunu_[a][Idx]
+                        + PiPrev
+                              * (g
+                                 + arena_prev.u_[0][Idx]
+                                       * arena_prev.u_[a][Idx]);
+                    T[a] = (e_local + pressure) * arena.u_[0][Idx]
+                               * arena.u_[a][Idx]
+                           + (a == 0 ? -pressure : 0.) + wCurr * VCurr
+                           + wPrev * VPrev;
+                }
+                N_B += arena.rhob_[Idx] * arena.u_[0][Idx]
+                       + wCurr * arena.Wmunu_[10][Idx]
+                       + wPrev * arena_prev.Wmunu_[10][Idx];
+                const double T_tau_tau = T[0];
+                const double T01_local = T[1];
+                const double T02_local = T[2];
+                const double T_tau_eta = T[3];
                 T_tau_t += T_tau_tau * cosh_eta + T_tau_eta * sinh_eta;
                 T_tau_x += T01_local;
                 T_tau_y += T02_local;
                 T_tau_z += T_tau_tau * sinh_eta + T_tau_eta * cosh_eta;
-
-                // compute the energy-momentum vector on the edge
-                if (ieta == 0 || ieta == neta - 1 || ix == 0 || ix == nx - 1
-                    || iy == 0 || iy == ny - 1) {
-                    N_B_edge +=
-                        arena.rhob_[Idx] * u0 + arena_prev.Wmunu_[10][Idx];
-                    T_tau_t_edge += T_tau_tau * cosh_eta + T_tau_eta * sinh_eta;
-                    T_tau_x_edge += T01_local;
-                    T_tau_y_edge += T02_local;
-                    T_tau_z_edge += T_tau_tau * sinh_eta + T_tau_eta * cosh_eta;
-                }
             }
     // add units
     double factor = tau * dx * dy * deta;
@@ -1254,31 +1355,23 @@ void Cell_info::check_conservation_law(
     T_tau_x *= factor * Util::hbarc;  // GeV
     T_tau_y *= factor * Util::hbarc;  // GeV
     T_tau_z *= factor * Util::hbarc;  // GeV
-    N_B_edge *= factor;
-    T_tau_t_edge *= factor * Util::hbarc;  // GeV
-    T_tau_x_edge *= factor * Util::hbarc;  // GeV
-    T_tau_y_edge *= factor * Util::hbarc;  // GeV
-    T_tau_z_edge *= factor * Util::hbarc;  // GeV
-
-    // compute the outflow flux
-    if (tau > DATA.tau0) {
-        outflow_flux[0] += T_tau_t_edge - Pmu_edge_prev[0];
-        outflow_flux[1] += T_tau_x_edge - Pmu_edge_prev[1];
-        outflow_flux[2] += T_tau_y_edge - Pmu_edge_prev[2];
-        outflow_flux[3] += T_tau_z_edge - Pmu_edge_prev[3];
-        outflow_flux[4] += N_B_edge - Pmu_edge_prev[4];
-
-        N_B += outflow_flux[4];
-        T_tau_t += outflow_flux[0];  // GeV
-        T_tau_x += outflow_flux[1];  // GeV
-        T_tau_y += outflow_flux[2];  // GeV
-        T_tau_z += outflow_flux[3];  // GeV
+    // add what has left the grid: the time integral (trapezoidal rule) of
+    // the flux through the grid faces since tau0
+    if (std::abs(tau - DATA.tau0) < 1e-10) {
+        outflow_flux = {0.};
+    } else {
+        TJbVec fluxCurr, fluxPrev;
+        boundary_outflow_rate(arena, tau, fluxCurr);
+        boundary_outflow_rate(arena_prev, tau - DATA.delta_tau, fluxPrev);
+        for (int i = 0; i < 5; i++) {
+            outflow_flux[i] += 0.5 * DATA.delta_tau * (fluxCurr[i] + fluxPrev[i]);
+        }
     }
-    Pmu_edge_prev[0] = T_tau_t_edge;
-    Pmu_edge_prev[1] = T_tau_x_edge;
-    Pmu_edge_prev[2] = T_tau_y_edge;
-    Pmu_edge_prev[3] = T_tau_z_edge;
-    Pmu_edge_prev[4] = N_B_edge;
+    T_tau_t += outflow_flux[0];  // GeV
+    T_tau_x += outflow_flux[1];  // GeV
+    T_tau_y += outflow_flux[2];  // GeV
+    T_tau_z += outflow_flux[3];  // GeV
+    N_B += outflow_flux[4];
 
     // output results
     music_message << "total energy T^{taut} = " << T_tau_t << " GeV";
@@ -1286,16 +1379,94 @@ void Cell_info::check_conservation_law(
     music_message << "net longitudinal momentum Pz = " << T_tau_z << " GeV";
     music_message.flush("info");
     music_message << "net baryon number N_B = " << N_B;
-    if (N_B > 0. || N_B < 500.) {
+    // N_B is exactly 0 without baryon transport, so 0 must pass
+    if (N_B >= 0. && N_B < 500.) {
         music_message.flush("info");
     } else {
         music_message.flush("error");
         exit(1);
     }
-    output_file << scientific << setprecision(6) << tau << "  " << T_tau_t
+    output_file << scientific << setprecision(10) << tau << "  " << T_tau_t
                 << "  " << T_tau_x << "  " << T_tau_y << "  " << T_tau_z << "  "
                 << N_B << std::endl;
     output_file.close();
+}
+
+//! Rate (per unit tau) at which E, Px, Py, Pz [GeV] and N_B leave the grid
+//! through its faces. With the components tau u^eta, tau pi^{mu eta}, ...
+//! (hat), the Cartesian components nu = t, x, y, z obey
+//!   d_tau(tau T^{tau nu}) + d_i(tau T^{i nu}) + d_eta(hat T^{eta nu}) = 0,
+//! hat T^{eta t} = cosh(eta) hat T^{eta tau} + sinh(eta) hat T^{eta eta}.
+//! The ghost cells copy the edge cells, so the flux through a face is the
+//! flux of the edge cell.
+void Cell_info::boundary_outflow_rate(
+    Fields &arena, const double tau, TJbVec &rate) const {
+    rate = {0.};
+    const int neta = arena.nEta();
+    const int nx = arena.nX();
+    const int ny = arena.nY();
+    const double dx = DATA.delta_x;
+    const double dy = DATA.delta_y;
+    const double deta = DATA.delta_eta;
+    // W^{mu nu} index for (mu, nu) in tau, x, y, eta
+    const int widx[4][4] = {
+        {0, 1, 2, 3}, {1, 4, 5, 6}, {2, 5, 7, 8}, {3, 6, 8, 9}};
+    const double ghat[4] = {1., -1., -1., -1.};
+
+    // adds the outward flux of cell Idx through the face normal to
+    // direction mu (1 = x, 2 = y, 3 = eta) with sign = +1 / -1
+    auto addFace = [&](int Idx, double eta, int mu, double sign,
+                       double area) {
+        const double e = arena.e_[Idx];
+        const double rhob = arena.rhob_[Idx];
+        const double P = eos.get_pressure(e, rhob);
+        // total bulk pressure, as in MakeWSource and the cell content
+        const double Pi = arena.piBulk_[Idx] + arena.piBulkChem_[Idx];
+        double u[4];
+        for (int i = 0; i < 4; i++) u[i] = arena.u_[i][Idx];
+        double T[4];  // hat T^{mu nu}, nu = tau, x, y, eta
+        for (int nu = 0; nu < 4; nu++) {
+            T[nu] = (e + P + Pi) * u[mu] * u[nu]
+                    + arena.Wmunu_[widx[mu][nu]][Idx];
+            if (nu == mu) T[nu] -= (P + Pi) * ghat[mu];
+        }
+        const double J = rhob * u[mu] + arena.Wmunu_[10 + mu][Idx];
+        const double ch = cosh(eta);
+        const double sh = sinh(eta);
+        const double f = sign * area;
+        rate[0] += f * (ch * T[0] + sh * T[3]) * Util::hbarc;
+        rate[1] += f * T[1] * Util::hbarc;
+        rate[2] += f * T[2] * Util::hbarc;
+        rate[3] += f * (sh * T[0] + ch * T[3]) * Util::hbarc;
+        rate[4] += f * J;
+    };
+
+    for (int ieta = 0; ieta < neta; ieta++) {
+        const double eta = deta * ieta - DATA.eta_size / 2.0;
+        for (int iy = 0; iy < ny; iy++) {
+            addFace(arena.getFieldIdx(0, iy, ieta), eta, 1, -1., tau * dy * deta);
+            addFace(arena.getFieldIdx(nx - 1, iy, ieta), eta, 1, +1.,
+                    tau * dy * deta);
+        }
+        for (int ix = 0; ix < nx; ix++) {
+            addFace(arena.getFieldIdx(ix, 0, ieta), eta, 2, -1., tau * dx * deta);
+            addFace(arena.getFieldIdx(ix, ny - 1, ieta), eta, 2, +1.,
+                    tau * dx * deta);
+        }
+    }
+    if (neta > 1) {
+        // the cells cover [-eta_size/2 - deta/2, eta_size/2 + deta/2]; the
+        // faces sit half a cell beyond the outermost cell centres
+        const double eta_m = -DATA.eta_size / 2.0 - deta / 2.0;
+        const double eta_p = DATA.eta_size / 2.0 + deta / 2.0;
+        for (int iy = 0; iy < ny; iy++) {
+            for (int ix = 0; ix < nx; ix++) {
+                addFace(arena.getFieldIdx(ix, iy, 0), eta_m, 3, -1., dx * dy);
+                addFace(arena.getFieldIdx(ix, iy, neta - 1), eta_p, 3, +1.,
+                        dx * dy);
+            }
+        }
+    }
 }
 
 //! This function putputs files to check with Gubser flow solution

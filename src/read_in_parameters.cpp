@@ -38,6 +38,19 @@ InitData read_in_parameters(std::string input_file) {
     parameter_list.Initial_profile =
         (getParameter(input_file, "Initial_profile", 1));
 
+    // dynamicGridDetermination
+    parameter_list.dynamicGridDetermination = false;
+    if (parameter_list.Initial_profile == 13
+        || parameter_list.Initial_profile == 131) {
+        int tempdynamicGridDetermination =
+            (getParameter(input_file, "dynamicGridDetermination", 1));
+        if (tempdynamicGridDetermination == 0) {
+            parameter_list.dynamicGridDetermination = false;
+        } else {
+            parameter_list.dynamicGridDetermination = true;
+        }
+    }
+
     // boost-invariant
     int temp_boost_invariant = getParameter(input_file, "boost_invariant", 1);
     if (temp_boost_invariant == 0) {
@@ -45,6 +58,9 @@ InitData read_in_parameters(std::string input_file) {
     } else {
         parameter_list.boost_invariant = true;
     }
+
+    parameter_list.string_tilt_update =
+        (getParameter(input_file, "string_tilt_update", 0));
 
     parameter_list.output_initial_density_profiles =
         (getParameter(input_file, "output_initial_density_profiles", 0));
@@ -74,6 +90,7 @@ InitData read_in_parameters(std::string input_file) {
         (getParameter(input_file, "parton_quench_factor", 1.0));
 
     parameter_list.gridPadding = getParameter(input_file, "gridPadding", 3.0);
+    parameter_list.gridPaddingCells = 0;
 
     //////////////////////////////////////////////////////////////////////////
     // parameters for parameteric initial conditions
@@ -284,6 +301,13 @@ InitData read_in_parameters(std::string input_file) {
     parameter_list.quest_revert_strength =
         (getParameter(input_file, "quest_revert_strength", 10.));
 
+    // partial_tau u^i in dilute cells from the ideal equations of motion
+    // (1, default) or everywhere from a backward time difference (0)
+    parameter_list.Du_from_ideal_EoM =
+        (getParameter(input_file, "Du_from_ideal_EoM", 1));
+    parameter_list.Du_from_ideal_EoM_e_dilute =
+        (getParameter(input_file, "Du_from_ideal_EoM_e_dilute", 0.003));
+
     // Switch to use Resummed transport coefficients
     if (getParameter(input_file, "FlagResumTransportCoeff", 0) == 1) {
         parameter_list.FlagResumTransportCoeff = true;
@@ -404,6 +428,19 @@ InitData read_in_parameters(std::string input_file) {
     // 2: output bulk information in binary format
     parameter_list.outputEvolutionData =
         (getParameter(input_file, "output_evolution_data", 0));
+    // beastMode >= 2 changes delta_tau (and for beastMode 3 also the
+    // transverse grid) during the evolution, while the evolution file
+    // header and the in-memory hydro grid are only set once at tau0
+    if (parameter_list.beastMode >= 2
+        && (parameter_list.outputEvolutionData != 0
+            || parameter_list.store_hydro_info_in_memory != 0)) {
+        music_message << "output_evolution_data and "
+                      << "store_hydro_info_in_memory are incompatible with "
+                      << "beastMode=" << parameter_list.beastMode
+                      << ", resetting beastMode=1";
+        music_message.flush("info");
+        parameter_list.beastMode = 1;
+    }
 
     // only works for output_evolution_data == 1
     parameter_list.outputBinaryEvolution =
@@ -417,6 +454,8 @@ InitData read_in_parameters(std::string input_file) {
         (getParameter(input_file, "output_outofequilibriumsize", 0));
     parameter_list.output_vorticity =
         (getParameter(input_file, "output_vorticity", 0));
+    parameter_list.output_OAM_density_Evolution =
+        (getParameter(input_file, "output_OAM_density_Evolution", 0));
     parameter_list.output_hydro_debug_info =
         (getParameter(input_file, "output_hydro_debug_info", 0));
 
@@ -486,6 +525,8 @@ InitData read_in_parameters(std::string input_file) {
         parameter_list.N_freeze_out =
             (getParameter(input_file, "N_freeze_out", 1));
     }
+    parameter_list.epsFO_low =
+        getParameter(input_file, "epsFO_low", 0.05);  // GeV/fm^3
     if (parameter_list.N_freeze_out > 1) {
         parameter_list.eps_freeze_max =
             (getParameter(input_file, "eps_freeze_max", 0.18));
@@ -798,20 +839,24 @@ void check_parameters(InitData &parameter_list, std::string input_file) {
         parameter_list.eta_size = 0.0;
     }
 
-    if (parameter_list.delta_tau / parameter_list.delta_x
-        > parameter_list.dtaudxRatio) {
-        music_message << "Warning: Delta_Tau = " << parameter_list.delta_tau
-                      << " maybe too large! ";
-        music_message.flush("warning");
-
-        bool reset_dtau_use_CFL_condition = true;
+    // reset_dtau_use_CFL_condition: read it unconditionally, because the
+    // initial-condition and source code also check it after changing dx
+    bool reset_dtau_use_CFL_condition = true;
+    {
         int temp_CFL_condition = 1;
         string tempinput =
             Util::StringFind4(input_file, "reset_dtau_use_CFL_condition");
         if (tempinput != "empty")
             istringstream(tempinput) >> temp_CFL_condition;
         if (temp_CFL_condition == 0) reset_dtau_use_CFL_condition = false;
-        parameter_list.resetDtau = reset_dtau_use_CFL_condition;
+    }
+    parameter_list.resetDtau = reset_dtau_use_CFL_condition;
+
+    if (parameter_list.delta_tau / parameter_list.delta_x
+        > parameter_list.dtaudxRatio) {
+        music_message << "Warning: Delta_Tau = " << parameter_list.delta_tau
+                      << " maybe too large! ";
+        music_message.flush("warning");
 
         if (reset_dtau_use_CFL_condition) {
             music_message.info("reset dtau using CFL condition.");
@@ -922,6 +967,28 @@ void check_parameters(InitData &parameter_list, std::string input_file) {
     if (parameter_list.dNdy_y_min > parameter_list.dNdy_y_max) {
         music_message << "dNdy_y_min = " << parameter_list.dNdy_y_min << " < "
                       << "dNdy_y_max = " << parameter_list.dNdy_y_max << "!";
+        music_message.flush("error");
+        exit(1);
+    }
+
+    if (parameter_list.output_OAM_density_Evolution < 0
+        || parameter_list.output_OAM_density_Evolution > 2) {
+        music_message << "output_OAM_density_Evolution must be 0, 1, or 2";
+        music_message.flush("error");
+        exit(1);
+    }
+
+    if (parameter_list.string_tilt_update < 0
+        || parameter_list.string_tilt_update > 1) {
+        music_message << "string_tilt_update must be 0 or 1";
+        music_message.flush("error");
+        exit(1);
+    }
+
+    if (parameter_list.string_tilt_update == 1
+        && parameter_list.stringTransverseShiftFrac > 0.0) {
+        music_message << "while string_tilt_update is turned on, "
+                         "StringTransverseShiftFrac cannot be  > 0 ";
         music_message.flush("error");
         exit(1);
     }

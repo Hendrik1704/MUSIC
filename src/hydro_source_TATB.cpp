@@ -23,6 +23,7 @@ HydroSourceTATB::HydroSourceTATB(InitData &DATA_in) : DATA_(DATA_in) {
 
     TA_ = 0.;
     TB_ = 0.;
+    TATB_ = 0.;
     if (DATA_.Initial_profile == 113) {
         read_in_participants_and_compute_TATB();
     } else {
@@ -58,7 +59,11 @@ HydroSourceTATB::HydroSourceTATB(InitData &DATA_in) : DATA_(DATA_in) {
     gridYmin_ = -DATA_.y_size / 2.;
     gridDX_ = DATA_.delta_x;
     gridDY_ = DATA_.delta_y;
-    gridDtau_ = DATA_.delta_tau;
+
+    // dimensions of profile_TA/TB, used to clamp the gradient stencil
+    gridNX_ = static_cast<int>(profile_TA.size());
+    gridNY_ = gridNX_ > 0 ? static_cast<int>(profile_TA[0].size()) : 0;
+    preEqFlowFactor_ = DATA_.preEqFlowFactor;
 
     eta0_ = DATA_.eta_flat / 2.;
     eta_m_ = DATA_.eta_m;
@@ -107,6 +112,7 @@ void HydroSourceTATB::read_in_TATB() {
             TB_temp.push_back(TB);
             TA_ += TA;
             TB_ += TB;
+            TATB_ += TA * TB;
         }
         profile_TA.push_back(TA_temp);
         profile_TB.push_back(TB_temp);
@@ -115,6 +121,7 @@ void HydroSourceTATB::read_in_TATB() {
     TBfile.close();
     TA_ *= DATA_.delta_x * DATA_.delta_y;
     TB_ *= DATA_.delta_x * DATA_.delta_y;
+    TATB_ *= DATA_.delta_x * DATA_.delta_y;
 }
 
 //! This function reads in the spatal information of the participants
@@ -195,6 +202,13 @@ void HydroSourceTATB::read_in_participants_and_compute_TATB() {
     for (const auto &part_i : partList) {
         computeTATB(part_i.x, part_i.y, part_i.dir);
     }
+
+    for (int i = 0; i < DATA_.nx; i++) {
+        for (int j = 0; j < DATA_.ny; j++) {
+            TATB_ += profile_TA[i][j] * profile_TB[i][j];
+        }
+    }
+    TATB_ *= DATA_.delta_x * DATA_.delta_y;
 }
 
 void HydroSourceTATB::computeTATB(
@@ -220,25 +234,16 @@ void HydroSourceTATB::computeTATB(
     }
 }
 
-void HydroSourceTATB::get_hydro_energy_source(
-    const double tau, const double x, const double y, const double eta_s,
-    const FlowVec &u_mu, EnergyFlowVec &j_mu) const {
-    j_mu = {0};
-    if (std::abs((tau - tau_source)) > 1. / 2. * gridDtau_) return;
-
-    const int ix = static_cast<int>((x - gridXmin_) / gridDX_ + 0.1);
-    const int iy = static_cast<int>((y - gridYmin_) / gridDY_ + 0.1);
-
-    const double TA = profile_TA[ix][iy];
-    const double TB = profile_TB[ix][iy];
-
+void HydroSourceTATB::compute_energy_density(
+    const double TA, const double TB, const double eta_s, double &epsilon,
+    double &y_L) const {
     double y_CM = atanh((TA - TB) / (TA + TB + Util::small_eps) * tanhYbeam_);
     double M_inv =
         Util::m_N
         * std::sqrt(TA * TA + TB * TB + 2.0 * TA * TB * std::cosh(2.0 * ybeam_))
         / (Util::hbarc);
 
-    double y_L = yL_frac_ * y_CM;
+    y_L = yL_frac_ * y_CM;
     if (beta_ > 1e-8) {
         // for mixed profile, use yL solved from tilted source model
         y_L = compute_yL(TA, TB, y_CM, eta0_, sigma_eta_, eta_m_);
@@ -264,22 +269,82 @@ void HydroSourceTATB::get_hydro_energy_source(
              TA, TB, eta0_, eta_m_, sigma_eta_, y_CM, M_inv, y_L)
          / tau_source);
 
-    double epsilon = (beta_ * tilted_epsilon * tilted_norm
-                      + (1. - beta_) * shifted_epsilon * shifted_norm)
-                     / gridDtau_;  // [1/fm^5]
+    epsilon =
+        (beta_ * tilted_epsilon * tilted_norm
+         + (1. - beta_) * shifted_epsilon * shifted_norm);  // [1/fm^4]
+}
 
-    j_mu[0] = epsilon * cosh(y_L);  // [1/fm^5]
-    j_mu[3] = epsilon * sinh(y_L);  // [1/fm^5]
+void HydroSourceTATB::get_hydro_energy_source(
+    const double tau, const double x, const double y, const double eta_s,
+    const FlowVec &u_mu, EnergyFlowVec &j_mu) const {
+    j_mu = {0};
+    if (std::abs((tau - tau_source)) > 1. / 2. * DATA_.delta_tau) return;
+
+    // outside the stored profile (e.g. a re-run on an enlarged grid) TA and
+    // TB are zero
+    // floor, not a cast: a cast truncates -0.9 to 0, so the padding cell
+    // next to the profile would repeat its edge column
+    const int ix = static_cast<int>(std::floor((x - gridXmin_) / gridDX_ + 0.1));
+    const int iy = static_cast<int>(std::floor((y - gridYmin_) / gridDY_ + 0.1));
+    if (!profileIndexInRange(ix, iy)) return;
+
+    const double TA = profile_TA[ix][iy];
+    const double TB = profile_TB[ix][iy];
+
+    double epsilon = 0;
+    double y_L = 0;
+    compute_energy_density(TA, TB, eta_s, epsilon, y_L);
+
+    // compute the transverse gradient of the energy density
+    int idx_x = std::min(gridNX_ - 1, ix + 1);
+    double e_px = 0;
+    double y_temp = 0;
+    compute_energy_density(
+        profile_TA[idx_x][iy], profile_TB[idx_x][iy], eta_s, e_px, y_temp);
+    idx_x = std::max(0, ix - 1);
+    double e_mx = 0;
+    compute_energy_density(
+        profile_TA[idx_x][iy], profile_TB[idx_x][iy], eta_s, e_mx, y_temp);
+    double de_dx =
+        (e_px - e_mx) / (2. * gridDX_ * epsilon + Util::small_eps);  // [1/fm]
+    int idx_y = std::min(gridNY_ - 1, iy + 1);
+    double e_py = 0;
+    compute_energy_density(
+        profile_TA[ix][idx_y], profile_TB[ix][idx_y], eta_s, e_py, y_temp);
+    idx_y = std::max(0, iy - 1);
+    double e_my = 0;
+    compute_energy_density(
+        profile_TA[ix][idx_y], profile_TB[ix][idx_y], eta_s, e_my, y_temp);
+    double de_dy =
+        (e_py - e_my) / (2. * gridDY_ * epsilon + Util::small_eps);  // [1/fm]
+
+    double eta_x = -preEqFlowFactor_ * de_dx;
+    double eta_y = -preEqFlowFactor_ * de_dy;
+    double eta_perp = sqrt(eta_x * eta_x + eta_y * eta_y);
+    if (epsilon < 1e-6) eta_perp = 0;
+    eta_perp = std::min(20., eta_perp);
+
+    double phi = atan2(eta_y, eta_x);
+    double gamma_perp = cosh(eta_perp);
+    double u_perp = sinh(eta_perp);
+
+    double de_dtau = epsilon / DATA_.delta_tau;  // [1/fm^5]
+
+    j_mu[0] = de_dtau * cosh(y_L);                       // [1/fm^5]
+    j_mu[1] = de_dtau * u_perp * cos(phi) / gamma_perp;  // [1/fm^5]
+    j_mu[2] = de_dtau * u_perp * sin(phi) / gamma_perp;  // [1/fm^5]
+    j_mu[3] = de_dtau * sinh(y_L);                       // [1/fm^5]
 }
 
 double HydroSourceTATB::get_hydro_rhob_source(
     const double tau, const double x, const double y, const double eta_s,
     const FlowVec &u_mu) const {
     double res = 0.;
-    if (std::abs((tau - tau_source)) > 1. / 2. * gridDtau_) return (res);
+    if (std::abs((tau - tau_source)) > 1. / 2. * DATA_.delta_tau) return (res);
 
-    const int ix = static_cast<int>((x - gridXmin_) / gridDX_ + 0.1);
-    const int iy = static_cast<int>((y - gridYmin_) / gridDY_ + 0.1);
+    const int ix = static_cast<int>(std::floor((x - gridXmin_) / gridDX_ + 0.1));
+    const int iy = static_cast<int>(std::floor((y - gridYmin_) / gridDY_ + 0.1));
+    if (!profileIndexInRange(ix, iy)) return (res);
     const double TA = profile_TA[ix][iy];
     const double TB = profile_TB[ix][iy];
     double eta_rhob_plus = eta_rhob_left_factor(eta_s);
@@ -287,15 +352,12 @@ double HydroSourceTATB::get_hydro_rhob_source(
     double norm_B =
         sqrt(2. / M_PI) * 1
         / (tau_source * (DATA_.eta_rhob_width_1 + DATA_.eta_rhob_width_2));
-    double norm_B_prime =
-        sqrt(2. / M_PI) * (TA + TB)
-        / (tau_source * (DATA_.eta_rhob_width_1 + DATA_.eta_rhob_width_2)
-           * (2 * TA * TB + Util::small_eps));
+    double norm_B_prime = norm_B * (TA_ + TB_) / (2 * TATB_ + Util::small_eps);
     const double omega = DATA_.omega_rhob;
 
     res = norm_B * (1 - omega) * (TA * eta_rhob_plus + TB * eta_rhob_minus)
           + norm_B_prime * omega * TA * TB * (eta_rhob_plus + eta_rhob_minus);
-    res /= gridDtau_;
+    res /= DATA_.delta_tau;
     return (res);
 }
 /*
@@ -317,16 +379,17 @@ double HydroSourceTATB::eta_rhob_left_factor(const double eta) const {
 
 double HydroSourceTATB::eta_rhob_left_factor(const double eta) const {
     double eta_0_nB = std::abs(DATA_.eta_rhob_0);
-    double sigma_B_plus = DATA_.eta_rhob_width_1;
-    double sigma_B_minus = DATA_.eta_rhob_width_2;
 
-    // double norm        = 1./(sqrt(M_PI)*tau_source*sigma_B_plus);
-    double exp_arg_1 = (eta - eta_0_nB) / sigma_B_plus;
-    double exp_arg_2 = (eta - eta_0_nB) / sigma_B_minus;
-
-    double res =
-        Util::theta(eta - eta_0_nB) * std::exp(-exp_arg_1 * exp_arg_1 / 2.)
-        + Util::theta(eta_0_nB - eta) * std::exp(-exp_arg_2 * exp_arg_2 / 2.);
+    double res = 0.;
+    if (eta < eta_0_nB) {
+        double sigma_B_minus = DATA_.eta_rhob_width_2;
+        double exp_arg_2 = (eta - eta_0_nB) / sigma_B_minus;
+        res = exp(-exp_arg_2 * exp_arg_2 / 2.);
+    } else {
+        double sigma_B_plus = DATA_.eta_rhob_width_1;
+        double exp_arg_1 = (eta - eta_0_nB) / sigma_B_plus;
+        res = exp(-exp_arg_1 * exp_arg_1 / 2.);
+    }
     return (res);
 }
 
@@ -348,17 +411,17 @@ double HydroSourceTATB::eta_rhob_right_factor(const double eta) const {
 */
 
 double HydroSourceTATB::eta_rhob_right_factor(const double eta) const {
-    double eta_0_nB = std::abs(DATA_.eta_rhob_0);
-    double sigma_B_plus = DATA_.eta_rhob_width_1;
-    double sigma_B_minus = DATA_.eta_rhob_width_2;
-
-    // double norm        = 1./(sqrt(M_PI)*tau_source*sigma_B_plus);
-    double exp_arg_1 = (eta + eta_0_nB) / sigma_B_plus;
-    double exp_arg_2 = (eta + eta_0_nB) / sigma_B_minus;
-
-    double res =
-        Util::theta(eta + eta_0_nB) * std::exp(-exp_arg_1 * exp_arg_1 / 2.)
-        + Util::theta(-eta_0_nB - eta) * std::exp(-exp_arg_2 * exp_arg_2 / 2.);
+    double eta_0_nB = -std::abs(DATA_.eta_rhob_0);
+    double res = 0;
+    if (eta < eta_0_nB) {
+        double sigma_B_plus = DATA_.eta_rhob_width_1;
+        double exp_arg_1 = (eta - eta_0_nB) / sigma_B_plus;
+        res = exp(-exp_arg_1 * exp_arg_1 / 2.);
+    } else {
+        double sigma_B_minus = DATA_.eta_rhob_width_2;
+        double exp_arg_2 = (eta - eta_0_nB) / sigma_B_minus;
+        res = exp(-exp_arg_2 * exp_arg_2 / 2.);
+    }
     return (res);
 }
 
@@ -422,6 +485,33 @@ double HydroSourceTATB::energy_eta_profile_normalisation_numerical(
 }
 
 // the functions defined for the new energy profile
+namespace {
+
+//! sinh(x)/x, continued to 1 at x = 0
+double sinhc(const double x) {
+    if (std::abs(x) < 1e-4) return (1. + x * x / 6.);
+    return (std::sinh(x) / x);
+}
+
+}  // namespace
+
+//! Integrals of exp(k eta) cosh(eta) and exp(k eta) sinh(eta) over
+//! [-eta_m, eta_m], written with sinhc so they stay finite at k = +-1
+//! (|ln a| = 2 eta_m), where the textbook closed form has a removable
+//! 1/(4 eta_m^2 - ln^2 a) singularity.
+void HydroSourceTATB::plateauExpIntegrals(
+    const double k, const double eta_m, double &I_cosh, double &I_sinh) {
+    if (eta_m <= 0.) {
+        I_cosh = 0.;
+        I_sinh = 0.;
+        return;
+    }
+    const double gp = sinhc((k + 1.) * eta_m);
+    const double gm = sinhc((k - 1.) * eta_m);
+    I_cosh = eta_m * (gp + gm);
+    I_sinh = eta_m * (gp - gm);
+}
+
 double HydroSourceTATB::compute_yL(
     const double TA, const double TB, const double ycm, const double eta_0,
     const double sigma_eta, const double eta_m) const {
@@ -439,13 +529,12 @@ double HydroSourceTATB::compute_yL(
     double sqrt_a = std::sqrt(a);
 
     // ------------------------------
-    // 2. Denominator base
+    // 2. plateau integrals, sqrt(a) int exp(k eta) {cosh, sinh}(eta)
+    //    with k = -ln(a)/(2 eta_m)
     // ------------------------------
-    double denom_base = 4.0 * eta_m * eta_m - loga * loga;
-    double denom = sqrt_a * denom_base;
-
-    // robust regularization
-    denom = std::copysign(std::max(std::abs(denom), Util::small_eps), denom);
+    double I_cosh = 0.;
+    double I_sinh = 0.;
+    plateauExpIntegrals(-loga / (2. * eta_m), eta_m, I_cosh, I_sinh);
 
     // ------------------------------
     // 3. denum
@@ -459,11 +548,7 @@ double HydroSourceTATB::compute_yL(
            * (std::cosh(eta_0)
               + std::erf(sigma_eta / std::sqrt(2.0)) * std::sinh(eta_0)));
 
-    double den_C = sqrt_a
-                   * (2.0 * eta_m
-                      * (-((a - 1.0) * std::cosh(eta_m) * loga)
-                         + 2.0 * (1.0 + a) * eta_m * std::sinh(eta_m)))
-                   / denom;
+    double den_C = sqrt_a * I_cosh;
 
     double denum = den_A + den_B + den_C;
 
@@ -481,11 +566,7 @@ double HydroSourceTATB::compute_yL(
                       * (std::cosh(eta_0) * std::erf(sigma_eta / std::sqrt(2.0))
                          + std::sinh(eta_0)));
 
-    double num_C = -sqrt_a
-                   * (2.0 * eta_m
-                      * (2.0 * (a - 1.0) * eta_m * std::cosh(eta_m)
-                         - (1.0 + a) * loga * std::sinh(eta_m)))
-                   / denom;
+    double num_C = sqrt_a * I_sinh;
 
     double num = num_A + num_B + num_C;
 
@@ -524,7 +605,6 @@ double HydroSourceTATB::energy_eta_profile_normalisation_tilted(
     // if (std::abs(a - 1.0) < Util::small_eps) a = 1.0 + Util::small_eps;
 
     double loga = std::log(std::max(a, Util::small_eps));
-    double sqrt_a = std::sqrt(a);
 
     // ------------------------------
     // Term 1
@@ -542,21 +622,13 @@ double HydroSourceTATB::energy_eta_profile_normalisation_tilted(
               + std::erf(sigma_eta / std::sqrt(2.0)) * std::sinh(eta_0)));
 
     // ------------------------------
-    // Term 3 denominator
+    // Term 3: sqrt(TA TB) int exp(k eta) cosh(eta) over the plateau,
+    // k = ln(a)/(2 eta_m)
     // ------------------------------
-    double denom_base = 4.0 * eta_m * eta_m - loga * loga;
-    double denom = sqrt_a * denom_base;
-    // robust regularization
-    denom = std::copysign(std::max(std::abs(denom), Util::small_eps), denom);
-
-    // ------------------------------
-    // Term 3
-    // ------------------------------
-    double term3 = std::sqrt(TA * TB)
-                   * (2.0 * eta_m
-                      * (-((a - 1.0) * std::cosh(eta_m) * loga)
-                         + 2.0 * (1.0 + a) * eta_m * std::sinh(eta_m)))
-                   / denom;
+    double I_cosh = 0.;
+    double I_sinh = 0.;
+    plateauExpIntegrals(loga / (2. * eta_m), eta_m, I_cosh, I_sinh);
+    double term3 = std::sqrt(TA * TB) * I_cosh;
 
     // ------------------------------
     // Combine numerator

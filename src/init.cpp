@@ -1,6 +1,7 @@
 // Copyright 2011 @ Bjoern Schenke, Sangyong Jeon, and Charles Gale
 #include "init.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -76,9 +77,10 @@ void Init::InitArena(
         music_message << "deta=" << DATA.delta_eta << ", dx=" << DATA.delta_x
                       << " fm, dy=" << DATA.delta_y << " fm.";
         music_message.flush("info");
-    } else if (   DATA.Initial_profile == 9 || DATA.Initial_profile == 91
-               || DATA.Initial_profile == 92 || DATA.Initial_profile == 93
-               || DATA.Initial_profile == 94 || DATA.Initial_profile ==95) {
+    } else if (
+        DATA.Initial_profile == 9 || DATA.Initial_profile == 91
+        || DATA.Initial_profile == 92 || DATA.Initial_profile == 93
+        || DATA.Initial_profile == 94 || DATA.Initial_profile == 95) {
         music_message.info(DATA.initName);
         ifstream profile(DATA.initName.c_str());
         if (!profile.is_open()) {
@@ -119,13 +121,18 @@ void Init::InitArena(
         music_message << "tau0 = " << DATA.tau0 << " fm/c.";
         music_message.flush("info");
         if (DATA.reRunCount == 0) {
-            DATA.gridPadding = 0;
+            DATA.gridPaddingCells = 0;
         } else {
-            DATA.gridPadding = 10 * DATA.reRunCount;  // count one side
-            DATA.nx += 2 * DATA.gridPadding;
-            DATA.ny += 2 * DATA.gridPadding;
+            DATA.gridPaddingCells = 10 * DATA.reRunCount;  // count one side
+            DATA.nx += 2 * DATA.gridPaddingCells;
+            DATA.ny += 2 * DATA.gridPaddingCells;
+            // keep dx, dy fixed and the grid centred at x = y = 0
+            DATA.x_size = DATA.delta_x * (DATA.nx - 1);
+            DATA.y_size = DATA.delta_y * (DATA.ny - 1);
             music_message << "reRunCount = " << DATA.reRunCount
-                          << ", nx=" << DATA.nx << ", ny=" << DATA.ny;
+                          << ", nx=" << DATA.nx << ", ny=" << DATA.ny
+                          << ", x_size=" << DATA.x_size
+                          << " fm, y_size=" << DATA.y_size << " fm";
             music_message.flush("info");
         }
     } else if (DATA.Initial_profile == 112 || DATA.Initial_profile == 113) {
@@ -133,6 +140,23 @@ void Init::InitArena(
         DATA.tau0 = std::max(DATA.tau0, tau_overlap) - DATA.delta_tau;
         music_message << "tau0 = " << DATA.tau0 << " fm/c.";
         music_message.flush("info");
+        if (DATA.reRunCount == 0) {
+            DATA.gridPaddingCells = 0;
+        } else {
+            // the source keeps TA, TB on the original grid and is zero
+            // outside it, so only the hydro grid is enlarged
+            DATA.gridPaddingCells = 10 * DATA.reRunCount;  // count one side
+            DATA.nx += 2 * DATA.gridPaddingCells;
+            DATA.ny += 2 * DATA.gridPaddingCells;
+            // keep dx, dy fixed and the grid centred at x = y = 0
+            DATA.x_size = DATA.delta_x * (DATA.nx - 1);
+            DATA.y_size = DATA.delta_y * (DATA.ny - 1);
+            music_message << "reRunCount = " << DATA.reRunCount
+                          << ", nx=" << DATA.nx << ", ny=" << DATA.ny
+                          << ", x_size=" << DATA.x_size
+                          << " fm, y_size=" << DATA.y_size << " fm";
+            music_message.flush("info");
+        }
     } else if (DATA.Initial_profile == 17) {
         music_message.info(
             "Initialize hydro with source terms from pre-equilibrium model");
@@ -229,16 +253,17 @@ void Init::InitTJb(Fields &arenaFieldsPrev, Fields &arenaFieldsCurr) {
         for (int ieta = 0; ieta < arenaFieldsCurr.nEta(); ieta++) {
             initial_IPGlasma_XY(ieta, arenaFieldsPrev, arenaFieldsCurr);
         }
-    } else if (   DATA.Initial_profile == 9 || DATA.Initial_profile == 91
-               || DATA.Initial_profile == 92 || DATA.Initial_profile == 93
-               || DATA.Initial_profile == 94) {
+    } else if (
+        DATA.Initial_profile == 9 || DATA.Initial_profile == 91
+        || DATA.Initial_profile == 92 || DATA.Initial_profile == 93
+        || DATA.Initial_profile == 94) {
         // read in the profile from file
 
 #pragma omp parallel for
         for (int ieta = 0; ieta < arenaFieldsCurr.nEta(); ieta++) {
             initial_IPGlasma_XY_with_pi(ieta, arenaFieldsPrev, arenaFieldsCurr);
         }
-    } else if (DATA.Initial_profile == 95) { 
+    } else if (DATA.Initial_profile == 95) {
         initial3D_IPGlasma_XY_with_pi(arenaFieldsPrev, arenaFieldsCurr);
     } else if (DATA.Initial_profile == 11 || DATA.Initial_profile == 111) {
         // read in the transverse profile from file with finite rho_B
@@ -600,22 +625,22 @@ void Init::initial_IPGlasma_XY_with_pi(
 
     const int nx = arenaFieldsCurr.nX();
     const int ny = arenaFieldsCurr.nY();
-    std::vector<double> temp_profile_ed(nx*ny, 0.0);
-    std::vector<double> temp_profile_utau(nx*ny, 0.0);
-    std::vector<double> temp_profile_ux(nx*ny, 0.0);
-    std::vector<double> temp_profile_uy(nx*ny, 0.0);
-    std::vector<double> temp_profile_ueta(nx*ny, 0.0);
-    std::vector<double> temp_profile_pitautau(nx*ny, 0.0);
-    std::vector<double> temp_profile_pitaux(nx*ny, 0.0);
-    std::vector<double> temp_profile_pitauy(nx*ny, 0.0);
-    std::vector<double> temp_profile_pitaueta(nx*ny, 0.0);
-    std::vector<double> temp_profile_pixx(nx*ny, 0.0);
-    std::vector<double> temp_profile_pixy(nx*ny, 0.0);
-    std::vector<double> temp_profile_pixeta(nx*ny, 0.0);
-    std::vector<double> temp_profile_piyy(nx*ny, 0.0);
-    std::vector<double> temp_profile_piyeta(nx*ny, 0.0);
-    std::vector<double> temp_profile_pietaeta(nx*ny, 0.0);
-    std::vector<double> temp_profile_PI_bulk(nx*ny, 0.0);
+    std::vector<double> temp_profile_ed(nx * ny, 0.0);
+    std::vector<double> temp_profile_utau(nx * ny, 0.0);
+    std::vector<double> temp_profile_ux(nx * ny, 0.0);
+    std::vector<double> temp_profile_uy(nx * ny, 0.0);
+    std::vector<double> temp_profile_ueta(nx * ny, 0.0);
+    std::vector<double> temp_profile_pitautau(nx * ny, 0.0);
+    std::vector<double> temp_profile_pitaux(nx * ny, 0.0);
+    std::vector<double> temp_profile_pitauy(nx * ny, 0.0);
+    std::vector<double> temp_profile_pitaueta(nx * ny, 0.0);
+    std::vector<double> temp_profile_pixx(nx * ny, 0.0);
+    std::vector<double> temp_profile_pixy(nx * ny, 0.0);
+    std::vector<double> temp_profile_pixeta(nx * ny, 0.0);
+    std::vector<double> temp_profile_piyy(nx * ny, 0.0);
+    std::vector<double> temp_profile_piyeta(nx * ny, 0.0);
+    std::vector<double> temp_profile_pietaeta(nx * ny, 0.0);
+    std::vector<double> temp_profile_PI_bulk(nx * ny, 0.0);
 
     // read the one slice
     double density, dummy1, dummy2, dummy3;
@@ -628,16 +653,15 @@ void Init::initial_IPGlasma_XY_with_pi(
             int idx = iy + ix * ny;
             std::getline(profile, dummy);
             std::stringstream ss(dummy);
-            ss >> dummy1 >> dummy2 >> dummy3
-               >> density >> utau >> ux >> uy >> ueta
-               >> pitautau >> pitaux >> pitauy >> pitaueta
-               >> pixx >> pixy >> pixeta >> piyy >> piyeta >> pietaeta >> PI_bulk;
-            ueta = ueta*tau0;
-            temp_profile_ed    [idx] = density * DATA.sFactor / hbarc; // 1/fm^4
-            temp_profile_ux    [idx] = ux;
-            temp_profile_uy    [idx] = uy;
-            temp_profile_ueta  [idx] = ueta;
-            temp_profile_utau  [idx] = sqrt(1. + ux*ux + uy*uy + ueta*ueta);
+            ss >> dummy1 >> dummy2 >> dummy3 >> density >> utau >> ux >> uy
+                >> ueta >> pitautau >> pitaux >> pitauy >> pitaueta >> pixx
+                >> pixy >> pixeta >> piyy >> piyeta >> pietaeta >> PI_bulk;
+            ueta = ueta * tau0;
+            temp_profile_ed[idx] = density * DATA.sFactor / hbarc;  // 1/fm^4
+            temp_profile_ux[idx] = ux;
+            temp_profile_uy[idx] = uy;
+            temp_profile_ueta[idx] = ueta;
+            temp_profile_utau[idx] = sqrt(1. + ux * ux + uy * uy + ueta * ueta);
             // no hbarc factor for the viscous components
             // they are already in 1/fm^4 from the IP-Glasma output
             double visFactor = DATA.sFactor * DATA.preEqVisFactor;
@@ -649,7 +673,7 @@ void Init::initial_IPGlasma_XY_with_pi(
             temp_profile_pixeta[idx] = pixeta * tau0 * visFactor;
             temp_profile_piyy[idx] = piyy * visFactor;
             temp_profile_piyeta[idx] = piyeta * tau0 * visFactor;
-            temp_profile_PI_bulk[idx] = PI_bulk * visFactor / hbarc; // 1/fm^4
+            temp_profile_PI_bulk[idx] = PI_bulk * visFactor / hbarc;  // 1/fm^4
 
             utau = temp_profile_utau[idx];
             temp_profile_pietaeta[idx] =
@@ -720,7 +744,8 @@ void Init::initial_IPGlasma_XY_with_pi(
                 arenaFieldsCurr.u_[3][Fidx] = temp_profile_ueta[idx];
             }
 
-            if (DATA.Initial_profile == 9 || DATA.Initial_profile == 93 || DATA.Initial_profile == 94) {
+            if (DATA.Initial_profile == 9 || DATA.Initial_profile == 93
+                || DATA.Initial_profile == 94) {
                 arenaFieldsCurr.Wmunu_[0][Fidx] = temp_profile_pitautau[idx];
                 arenaFieldsCurr.Wmunu_[1][Fidx] = temp_profile_pitaux[idx];
                 arenaFieldsCurr.Wmunu_[2][Fidx] = temp_profile_pitauy[idx];
@@ -744,7 +769,8 @@ void Init::initial_IPGlasma_XY_with_pi(
                         arenaFieldsCurr.piBulkChem_[Fidx] = 0;
                     }
                 } else if (DATA.Initial_profile == 94) {
-                    arenaFieldsCurr.piBulk_[Fidx] = temp_profile_PI_bulk[idx]; //1/fm^4
+                    arenaFieldsCurr.piBulk_[Fidx] =
+                        temp_profile_PI_bulk[idx];  // 1/fm^4
                 }
             }
 
@@ -772,8 +798,10 @@ void Init::initial_IPGlasma_XY_with_pi(
     }
 }
 
-void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaFieldsCurr) {
-    // Initial_profile == 95 for 3D profiles: e, u^\mu, pi^\mu\nu and read a bulk_PI 
+void Init::initial3D_IPGlasma_XY_with_pi(
+    Fields &arenaFieldsPrev, Fields &arenaFieldsCurr) {
+    // Initial_profile == 95 for 3D profiles: e, u^\mu, pi^\mu\nu and read a
+    // bulk_PI
     double tau0 = DATA.tau0;
     ifstream profile(DATA.initName.c_str());
 
@@ -784,22 +812,22 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
     const int nx = arenaFieldsCurr.nX();
     const int ny = arenaFieldsCurr.nY();
     const int neta = arenaFieldsCurr.nEta();
-    std::vector<double> temp_profile_ed(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_utau(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_ux(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_uy(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_ueta(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pitautau(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pitaux(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pitauy(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pitaueta(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pixx(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pixy(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pixeta(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_piyy(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_piyeta(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_pietaeta(nx*ny*neta, 0.0);
-    std::vector<double> temp_profile_PI_bulk(nx*ny*neta, 0.0);
+    std::vector<double> temp_profile_ed(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_utau(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_ux(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_uy(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_ueta(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pitautau(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pitaux(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pitauy(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pitaueta(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pixx(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pixy(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pixeta(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_piyy(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_piyeta(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_pietaeta(nx * ny * neta, 0.0);
+    std::vector<double> temp_profile_PI_bulk(nx * ny * neta, 0.0);
 
     // read the one slice
     double density, dummy1, dummy2, dummy3;
@@ -810,19 +838,20 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
     for (int ieta = 0; ieta < neta; ieta++) {
         for (int ix = 0; ix < nx; ix++) {
             for (int iy = 0; iy < ny; iy++) {
-                int idx = iy + ix * ny + ieta * ny * nx ;
+                int idx = iy + ix * ny + ieta * ny * nx;
                 std::getline(profile, dummy);
                 std::stringstream ss(dummy);
-                ss >> dummy1 >> dummy2 >> dummy3
-                 >> density >> utau >> ux >> uy >> ueta
-                 >> pitautau >> pitaux >> pitauy >> pitaueta
-                 >> pixx >> pixy >> pixeta >> piyy >> piyeta >> pietaeta >> PI_bulk;
-                ueta = ueta*tau0;
-                temp_profile_ed    [idx] = density * DATA.sFactor / hbarc; // 1/fm^4
-                temp_profile_ux    [idx] = ux;
-                temp_profile_uy    [idx] = uy;
-                temp_profile_ueta  [idx] = ueta;
-                temp_profile_utau  [idx] = sqrt(1. + ux*ux + uy*uy + ueta*ueta);
+                ss >> dummy1 >> dummy2 >> dummy3 >> density >> utau >> ux >> uy
+                    >> ueta >> pitautau >> pitaux >> pitauy >> pitaueta >> pixx
+                    >> pixy >> pixeta >> piyy >> piyeta >> pietaeta >> PI_bulk;
+                ueta = ueta * tau0;
+                temp_profile_ed[idx] =
+                    density * DATA.sFactor / hbarc;  // 1/fm^4
+                temp_profile_ux[idx] = ux;
+                temp_profile_uy[idx] = uy;
+                temp_profile_ueta[idx] = ueta;
+                temp_profile_utau[idx] =
+                    sqrt(1. + ux * ux + uy * uy + ueta * ueta);
                 // no hbarc factor for the viscous components
                 // they are already in 1/fm^4 from the IP-Glasma output
                 double visFactor = DATA.sFactor * DATA.preEqVisFactor;
@@ -834,7 +863,8 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
                 temp_profile_pixeta[idx] = pixeta * tau0 * visFactor;
                 temp_profile_piyy[idx] = piyy * visFactor;
                 temp_profile_piyeta[idx] = piyeta * tau0 * visFactor;
-                temp_profile_PI_bulk[idx] = PI_bulk * visFactor / hbarc; // 1/fm^4
+                temp_profile_PI_bulk[idx] =
+                    PI_bulk * visFactor / hbarc;  // 1/fm^4
 
                 utau = temp_profile_utau[idx];
                 temp_profile_pietaeta[idx] =
@@ -842,25 +872,27 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
                           * (ux * uy * temp_profile_pixy[idx]
                              + ux * ueta * temp_profile_pixeta[idx]
                              + uy * ueta * temp_profile_piyeta[idx])
-                    - (utau * utau - ux * ux) * temp_profile_pixx[idx]
-                    - (utau * utau - uy * uy) * temp_profile_piyy[idx])
+                      - (utau * utau - ux * ux) * temp_profile_pixx[idx]
+                      - (utau * utau - uy * uy) * temp_profile_piyy[idx])
                      / (utau * utau - ueta * ueta));
                 temp_profile_pitaux[idx] =
                     (1. / utau
-                    * (temp_profile_pixx[idx] * ux + temp_profile_pixy[idx] * uy
+                     * (temp_profile_pixx[idx] * ux
+                        + temp_profile_pixy[idx] * uy
                         + temp_profile_pixeta[idx] * ueta));
                 temp_profile_pitauy[idx] =
                     (1. / utau
-                    * (temp_profile_pixy[idx] * ux + temp_profile_piyy[idx] * uy
+                     * (temp_profile_pixy[idx] * ux
+                        + temp_profile_piyy[idx] * uy
                         + temp_profile_piyeta[idx] * ueta));
                 temp_profile_pitaueta[idx] =
                     (1. / utau
-                    * (temp_profile_pixeta[idx] * ux
+                     * (temp_profile_pixeta[idx] * ux
                         + temp_profile_piyeta[idx] * uy
                         + temp_profile_pietaeta[idx] * ueta));
                 temp_profile_pitautau[idx] =
                     (1. / utau
-                    * (temp_profile_pitaux[idx] * ux
+                     * (temp_profile_pitaux[idx] * ux
                         + temp_profile_pitauy[idx] * uy
                         + temp_profile_pitaueta[idx] * ueta));
             }
@@ -871,10 +903,10 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
     for (int ieta = 0; ieta < neta; ieta++) {
         for (int ix = 0; ix < nx; ix++) {
             for (int iy = 0; iy < ny; iy++) {
-                int idx = iy + ix * ny + ieta * ny * nx ; 
+                int idx = iy + ix * ny + ieta * ny * nx;
                 const double rhob = 0.0;
-                double epsilon = std::max(
-                    Util::small_eps, temp_profile_ed[idx]);
+                double epsilon =
+                    std::max(Util::small_eps, temp_profile_ed[idx]);
 
                 int Fidx = arenaFieldsCurr.getFieldIdx(ix, iy, ieta);
                 arenaFieldsCurr.e_[Fidx] = epsilon;
@@ -898,13 +930,15 @@ void Init::initial3D_IPGlasma_XY_with_pi(Fields &arenaFieldsPrev, Fields &arenaF
                 arenaFieldsCurr.Wmunu_[8][Fidx] = temp_profile_piyeta[idx];
                 arenaFieldsCurr.Wmunu_[9][Fidx] = temp_profile_pietaeta[idx];
 
-                arenaFieldsCurr.piBulk_[Fidx] = temp_profile_PI_bulk[idx]; //1/fm^4
+                arenaFieldsCurr.piBulk_[Fidx] =
+                    temp_profile_PI_bulk[idx];  // 1/fm^4
 
                 if (DATA.FlagResumTransportCoeff) {
                     auto grid_c = arenaFieldsCurr.getCell(Fidx);
                     regulationResummedTransCoeff(grid_c);
                     for (int idx_1d = 0; idx_1d < 10; idx_1d++) {
-                        arenaFieldsCurr.Wmunu_[idx_1d][Fidx] = grid_c.Wmunu[idx_1d];
+                        arenaFieldsCurr.Wmunu_[idx_1d][Fidx] =
+                            grid_c.Wmunu[idx_1d];
                         arenaFieldsCurr.piBulk_[Fidx] = grid_c.pi_b;
                     }
                 }
@@ -946,7 +980,7 @@ void Init::regulationResummedTransCoeff(Cell_small &grid_pt) {
     double pi_local = grid_pt.pi_b;
 
     double Rshear = sqrt(pisize) / (e_local + p_local + 1e-16);
-    double Rbulk = std::abs(pi_local) / (e_local + pi_local + 1e-16);
+    double Rbulk = std::abs(pi_local) / (e_local + p_local + 1e-16);
     double r_combined = 1.5 * (Rshear + Rbulk) + 1e-16;
     double renorm = std::min(1., DATA.preEqVisFactor / r_combined);
     for (int mu = 0; mu < 10; mu++) {
@@ -960,12 +994,24 @@ void Init::initial_MCGlb_with_rhob(
     // first load in the transverse profile
     ifstream profile_TA(DATA.initName_TA.c_str());
     ifstream profile_TB(DATA.initName_TB.c_str());
+    if (!profile_TA.is_open() || !profile_TB.is_open()) {
+        music_message << "Init::initial_MCGlb_with_rhob: can not open "
+                      << (profile_TA.is_open() ? DATA.initName_TB
+                                               : DATA.initName_TA);
+        music_message.flush("error");
+        exit(1);
+    }
 
-    const int nx =
-        arenaFieldsCurr.nX() - 2 * static_cast<int>(DATA.gridPadding);
-    const int ny =
-        arenaFieldsCurr.nY() - 2 * static_cast<int>(DATA.gridPadding);
+    const int nx = arenaFieldsCurr.nX() - 2 * DATA.gridPaddingCells;
+    const int ny = arenaFieldsCurr.nY() - 2 * DATA.gridPaddingCells;
     const int neta = arenaFieldsCurr.nEta();
+
+    // the padding cells added on a re-run get the same floor as the
+    // rest of the grid instead of e = 0 exactly (which gives T = 0)
+    std::fill(
+        arenaFieldsCurr.e_.begin(), arenaFieldsCurr.e_.end(),
+        Util::small_eps);
+    std::fill(arenaFieldsCurr.rhob_.begin(), arenaFieldsCurr.rhob_.end(), 0.);
 
     std::vector<double> temp_profile_TA(nx * ny);
     std::vector<double> temp_profile_TB(nx * ny);
@@ -978,6 +1024,12 @@ void Init::initial_MCGlb_with_rhob(
             profile_TB >> temp_profile_TB[idx];
             N_B += temp_profile_TA[idx] + temp_profile_TB[idx];
         }
+    }
+    if (!profile_TA || !profile_TB) {
+        music_message << "Init::initial_MCGlb_with_rhob: TA/TB files have "
+                      << "fewer than nx*ny = " << nx * ny << " values";
+        music_message.flush("error");
+        exit(1);
     }
     profile_TA.close();
     profile_TB.close();
@@ -1058,8 +1110,8 @@ void Init::initial_MCGlb_with_rhob(
                 epsilon = std::max(Util::small_eps, epsilon);
 
                 int idx_f = arenaFieldsCurr.getFieldIdx(
-                    static_cast<int>(ix + DATA.gridPadding),
-                    static_cast<int>(iy + DATA.gridPadding), ieta);
+                    ix + DATA.gridPaddingCells, iy + DATA.gridPaddingCells,
+                    ieta);
                 arenaFieldsCurr.e_[idx_f] = epsilon;
                 arenaFieldsCurr.rhob_[idx_f] = rhob;
 
@@ -1258,7 +1310,7 @@ void Init::initial_with_jetscape(
                                               / hbarc * DATA.tau0 * DATA.tau0;
 
             arenaFieldsPrev.e_[Fidx] = arenaFieldsCurr.e_[Fidx];
-            arenaFieldsPrev.rhob_[Fidx] = arenaFieldsPrev.rhob_[Fidx];
+            arenaFieldsPrev.rhob_[Fidx] = arenaFieldsCurr.rhob_[Fidx];
             for (int i = 0; i < 4; i++) {
                 arenaFieldsPrev.u_[i][Fidx] = arenaFieldsCurr.u_[i][Fidx];
             }

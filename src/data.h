@@ -21,13 +21,16 @@ typedef struct init_data {
     int reRunCount;
 
     int beastMode;
+    bool dynamicGridDetermination;
 
     int mode;  //!< 1: do everything;
                //!< 2: do hydro evolution only;
                //!< 3: do calculation of thermal spectra only;
                //!< 4: do resonance decays only
 
-    std::string initName;  //!< filename for initial condition T^{\mu\nu}
+    std::string initName;    //!< filename for initial condition T^{\mu\nu}
+    int string_tilt_update;  //! 0 => default StringTransverseShift
+                             //! 1 => strings are tilited
 
     // parameters for Initial_profile == 11 || 111
     std::string initName_TA;  //!< filename for nuclear thickness function TA
@@ -39,6 +42,9 @@ typedef struct init_data {
     std::string initName_AMPT;  //!< initial state filename from AMPT
 
     double gridPadding;  //!< grid padding size from user (default: 3 fm)
+    //! extra grid cells added on each side when re-running hydro
+    //! (used by Initial_profile 11/111; in number of cells, not fm)
+    int gridPaddingCells;
 
     //! random seed
     int seed;
@@ -131,6 +137,15 @@ typedef struct init_data {
     double shear_to_s;      //!< value of specific shear viscosity
 
     double quest_revert_strength;
+    //! 1: in dilute cells partial_tau u^i in sigma^{mu nu}, theta and Du^mu
+    //! comes from the ideal equations of motion instead of a backward time
+    //! difference
+    int Du_from_ideal_EoM;
+    //! [GeV/fm^3] (default 0.003) the ideal equations of motion are used below
+    //! this energy density and blended into the backward difference up to 5
+    //! times it. Below ~0.001 a lumpy event is unstable with the smoothness
+    //! guard at 4.
+    double Du_from_ideal_EoM_e_dilute;
     bool FlagResumTransportCoeff;
     double resumTransCoeffAlpha;
     int FlagCausalityMethod;
@@ -230,6 +245,9 @@ typedef struct init_data {
     int output_evolution_every_N_x;
     int output_evolution_every_N_y;
     int output_evolution_every_N_eta;
+    int output_OAM_density_Evolution;  //! output OAM area density evolution =>
+                                       //! 0 to turn off,   1 for initial time
+                                       //! step only , 2 for all time steps
     bool output_hydro_params_header;
     double output_evolution_T_cut;
     double output_evolution_e_cut;
@@ -252,6 +270,8 @@ typedef struct init_data {
                    //!< if 0 use temperature in TFO
 
     double epsilonFreeze;  //!< freeze-out energy density in GeV/fm^3
+    double epsFO_low;  //!< the lowest freeze-out energy density for the cold
+                       //!< corona in GeV/fm^3
     int N_freeze_out;
     double eps_freeze_min;
     double eps_freeze_max;
